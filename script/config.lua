@@ -68,6 +68,7 @@ NOTIFY_TYPE = { "gotify" }
 -- NEXT_SMTP_PROXY_SUBJECT = "来自 Air724UG 的通知"
 
 -- gotify 通知配置, https://gotify.net/
+-- GOTIFY_API = "http://127.0.0.1:8080"
 GOTIFY_API = ""
 -- gotify 标题
 GOTIFY_TITLE = "转发器"
