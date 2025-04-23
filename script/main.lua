@@ -31,7 +31,10 @@ require "handler_call"
 require "handler_powerkey"
 require "handler_sms"
 require "usbmsc"
+require "websocket"
 
+-- 配置
+local GOTIFY_POLL_INTERVAL = 20 * 1000 -- 轮询间隔 20 秒
 -- 输出音频通道选项, 0:听筒 1:耳机 2:喇叭
 -- 输入音频通道选项, 0:main_mic 1:auxiliary_mic 3:headphone_mic_left 4:headphone_mic_right
 
@@ -95,10 +98,165 @@ pins.setup(23, function(msg)
     end
 end, pio.PULLUP)
 
+
+-- 自动生成 GOTIFY_WS_URL 和 GOTIFY_POLL_URL
+local function generateGotifyUrls()
+    if config.GOTIFY_API == nil or config.GOTIFY_API == "" then
+        log.error("util_notify", "未配置 `config.GOTIFY_API`")
+        return nil, nil
+    end
+    if config.GOTIFY_CLIENT_TOKEN == nil or config.GOTIFY_CLIENT_TOKEN == "" then
+        log.error("util_notify", "未配置 `config.GOTIFY_CLIENT_TOKEN`")
+        return nil, nil
+    end
+
+    -- WebSocket URL
+    local ws_url = config.GOTIFY_API:gsub("^http://", "ws://"):gsub("^https://", "wss://") .. "/stream?token=" .. config.GOTIFY_CLIENT_TOKEN
+
+    -- Polling URL
+    local poll_url = config.GOTIFY_API .. "/message?token=" .. config.GOTIFY_CLIENT_TOKEN .. "&limit=1"
+
+    return ws_url, poll_url
+end
+
+local GOTIFY_WS_URL, GOTIFY_POLL_URL = generateGotifyUrls()
+
+-- WebSocket 状态标志
+local websocket_enabled = true -- 初始默认启用 WebSocket
+
+-- 检查手机号码格式
+local function checkNumber(number)
+    if number == nil or type(number) ~= "string" then
+        return false
+    end
+    if number:len() < 5 then
+        return false
+    end
+    return true
+end
+
+-- 处理 Gotify 消息
+local function handleGotifyMessage(message)
+    log.info("Gotify", "收到消息:", message)
+
+    -- 提取消息标题和内容
+    local sms_content = message.message
+    local receiver_number, sms_content_to_be_sent
+    receiver_number, sms_content_to_be_sent = sms_content:match("^%s*(%d+)%s*#%s*(.+)$") -- 英文#
+    if not receiver_number then
+        receiver_number, sms_content_to_be_sent = sms_content:match("^%s*(%d+)%s*＃%s*(.+)$") -- 中文＃
+    end
+
+    if receiver_number then
+        sms_content_to_be_sent = sms_content_to_be_sent:gsub("^%s+", ""):gsub("%s+$", "")
+        if sms_content_to_be_sent == "" then
+            log.warn("Gotify", "短信内容为空")
+            return
+        end
+    else
+        log.warn("Gotify", "短信格式错误，需要：手机号#内容 或 手机号＃内容")
+        return
+    end
+
+    if not checkNumber(receiver_number) then
+        log.error("Gotify", "无效的手机号码:", receiver_number)
+        return
+    end
+
+    log.info("Gotify", "准备发送短信", "接收号码:", receiver_number, "内容长度:", #sms_content_to_be_sent)
+
+    sys.taskInit(function()
+        local send_result, err = sms.send(receiver_number, sms_content_to_be_sent)
+        local time = os.time()
+        local date = os.date("*t", time)
+        local date_str = string.format("%04d/%02d/%02d,%02d:%02d:%02d", date.year, date.month, date.day, date.hour, date.min, date.sec)
+        if send_result then
+            log.info("Gotify", "短信发送成功")
+            util_notify.add({
+                "短信发送成功",
+                "时间: " .. date_str,
+                "接收号码: " .. receiver_number,
+                "内容长度: " .. #sms_content_to_be_sent
+            })
+        else
+            log.error("Gotify", "短信发送失败:", err)
+            util_notify.add({
+                "短信发送失败",
+                "错误: " .. tostring(err),
+                "接收号码: " .. receiver_number
+            })
+        end
+    end)
+end
+
+-- WebSocket 实时监听
+local function startWebSocket()
+    local ws = websocket.new(GOTIFY_WS_URL)
+
+    ws:on("open", function()
+        log.info("Gotify WebSocket", "连接已建立")
+        -- util_notify.add("WebSocket 连接已建立")
+    end)
+
+    ws:on("message", function(msg)
+        log.info("Gotify WebSocket", "收到消息")
+        local ok, data = pcall(json.decode, msg)
+        if ok and data and data.title == "sms" then
+            -- 只处理标题为 "sms" 的消息
+            handleGotifyMessage(data)
+        end
+    end)
+
+    ws:on("error", function(err)
+        log.error("Gotify WebSocket", "发生错误:", err)
+        -- util_notify.add("WebSocket 发生错误: " .. tostring(err))
+        websocket_enabled = false -- 禁用 WebSocket，切换到轮询模式
+        sys.timerStart(startPolling, GOTIFY_POLL_INTERVAL)
+    end)
+
+    ws:on("close", function(code)
+        log.warn("Gotify WebSocket", "连接关闭，关闭码:", code)
+        -- util_notify.add("WebSocket 连接已关闭，关闭码: " .. tostring(code))
+        websocket_enabled = false -- 禁用 WebSocket，切换到轮询模式
+        sys.timerStart(startPolling, GOTIFY_POLL_INTERVAL)
+    end)
+
+    sys.taskInit(ws.start,ws,180)
+end
+
+-- HTTP 轮询方式
+local function poll_gotify_messages()
+    log.info("Gotify Polling", "从 HTTP 拉取消息")
+    http.request("GET", GOTIFY_POLL_URL, nil, nil, nil, nil, function(result, prompt, head, body)
+        if not result or not body then
+            log.warn("Gotify Polling", "无效响应")
+            return
+        end
+        local ok, data = pcall(json.decode, body)
+        if ok and data and data.messages and #data.messages > 0 then
+            for _, message in ipairs(data.messages) do
+                if message.title == "sms" then -- 只处理标题为 "sms" 的消息
+                    handleGotifyMessage(message)
+                end
+            end
+        end
+    end)
+    sys.timerStart(poll_gotify_messages, GOTIFY_POLL_INTERVAL) -- 设置下一次轮询
+end
+
+-- 根据优先级启动 WebSocket 或轮询
+local function startPolling()
+    if websocket_enabled then
+        startWebSocket()
+    else
+        poll_gotify_messages()
+    end
+end
+
+-- 系统初始化任务
 sys.taskInit(function()
     -- 等待网络就绪
     sys.waitUntil("IP_READY_IND", 1000 * 60 * 2)
-
     -- 等待获取 Band 值
     -- sys.wait(1000 * 5)
 
@@ -115,15 +273,21 @@ sys.taskInit(function()
     -- 开机同步时间
     util_ntp.sync()
     sys.timerLoopStart(util_ntp.sync, 1000 * 30)
-end)
+    -- 检查配置是否有效
+    if not GOTIFY_WS_URL or not GOTIFY_POLL_URL then
+        log.error("Gotify", "无法启动监听，因配置无效")
+        return
+    end
 
+    -- 启动 Gotify 消息监听
+    startPolling()
+end)
 -- 验证 PIN 码
 sys.subscribe("SIM_IND", function(msg)
     if msg == "SIM_PIN" then
         util_mobile.pinVerify()
     end
 end)
-
 -- 系统初始化
 sys.init(0, 0)
 sys.run()

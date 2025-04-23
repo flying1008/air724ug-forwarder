@@ -17,14 +17,14 @@ module(...)
 
 -- 通知类型, 支持配置多个
 -- NOTIFY_TYPE = { "custom_post", "telegram", "pushdeer", "bark", "dingtalk", "feishu", "wecom", "pushover", "inotify", "next-smtp-proxy", "gotify", "serverchan" }
-NOTIFY_TYPE = { "custom_post" }
+NOTIFY_TYPE = { "gotify" }
 
 -- custom_post 通知配置, 自定义 POST 请求
 -- CUSTOM_POST_CONTENT_TYPE 支持 application/x-www-form-urlencoded 和 application/json
 -- CUSTOM_POST_BODY_TABLE 中的 {msg} 会被替换为通知内容
-CUSTOM_POST_URL = "https://sctapi.ftqq.com/<SENDKEY>.send"
-CUSTOM_POST_CONTENT_TYPE = "application/json"
-CUSTOM_POST_BODY_TABLE = { ["title"] = "这里是标题", ["desp"] = "{msg}" }
+-- CUSTOM_POST_URL = "https://sctapi.ftqq.com/<SENDKEY>.send"
+-- CUSTOM_POST_CONTENT_TYPE = "application/json"
+-- CUSTOM_POST_BODY_TABLE = { ["title"] = "这里是标题", ["desp"] = "{msg}" }
 
 -- telegram 通知配置, https://github.com/0wQ/telegram-notify 或者自行反代
 -- TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
@@ -68,10 +68,14 @@ CUSTOM_POST_BODY_TABLE = { ["title"] = "这里是标题", ["desp"] = "{msg}" }
 -- NEXT_SMTP_PROXY_SUBJECT = "来自 Air724UG 的通知"
 
 -- gotify 通知配置, https://gotify.net/
--- GOTIFY_API = ""
--- GOTIFY_TITLE = "Air724UG"
--- GOTIFY_PRIORITY = 8
--- GOTIFY_TOKEN = ""
+GOTIFY_API = ""
+-- gotify 标题
+GOTIFY_TITLE = "转发器"
+GOTIFY_PRIORITY = 8
+-- gotify token为创建的apps的token(需注意，需在gotify上创建一个名为"sms"的app)
+GOTIFY_TOKEN = ""
+-- gotify 客户端token(即为配置好的client的token)
+GOTIFY_CLIENT_TOKEN=""
 
 -- serverchan 通知配置
 -- SERVERCHAN_TITLE = "来自 Air724UG 的通知"
@@ -108,7 +112,7 @@ NOTIFY_RETRY_MAX = 100
 -- 关闭所有呼转 CCFC,18888888888
 -- 切换卡槽优先级 SIMSWITCH
 -- SMS_CONTROL_WHITELIST_NUMBERS = { "18xxxxxxx", "18xxxxxxx", "18xxxxxxx" }
-SMS_CONTROL_WHITELIST_NUMBERS = {}
+SMS_CONTROL_WHITELIST_NUMBERS = {}  
 
 -- 扬声器 TTS 播放短信内容, 0:关闭(默认), 1:仅验证码, 2:全部
 SMS_TTS = 0
@@ -118,7 +122,7 @@ SMS_TTS = 0
 
 -- 来电动作, 0:无操作, 1:自动接听(默认), 2:挂断, 3:自动接听后挂断, 4:等待30秒后自动接听
 -- 无操作 / 等待30秒后自动接听, 可以长按 POWERKEY 来手动接听挂断电话
-CALL_IN_ACTION = 1
+CALL_IN_ACTION = 0
 
 -------------------------------------------------- 其他配置 --------------------------------------------------
 
