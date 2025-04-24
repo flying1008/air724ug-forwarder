@@ -191,37 +191,96 @@ end
 
 -- WebSocket 实时监听
 local function startWebSocket()
+    -- 重连控制变量
+    local retry_count = 0
+    local MAX_RETRIES = 5  -- 最大重试次数
+    local BASE_INTERVAL = 1000  -- 基础重连间隔(ms)
+    local MAX_INTERVAL = 30000  -- 最大重连间隔(ms)
+    
+    -- 当前连接实例
     local ws = websocket.new(GOTIFY_WS_URL)
-
+    
+    -- 计算退避时间
+    local function getRetryDelay()
+        local delay = math.min(BASE_INTERVAL * (2 ^ retry_count), MAX_INTERVAL)
+        retry_count = retry_count + 1
+        return delay
+    end
+    
+    -- 清理函数
+    local function cleanup()
+        log.debug("Gotify WebSocket", "清理资源...")
+        if ws then
+            ws = nil
+        end
+    end
+    
+    local isManualReconnecting = false  -- 全局重连锁
+    -- 重连函数
+    local function reconnect()
+        log.debug("Gotify WebSocket", "尝试重连...")
+        if isManualReconnecting then return end  -- 防止重复进入
+    
+        isManualReconnecting = true
+        cleanup()
+        if retry_count <= MAX_RETRIES then
+            local delay = getRetryDelay()
+            log.warn("Gotify WebSocket", string.format("将在 %.1f 秒后尝试重连(%d/%d)", 
+                   delay/1000, retry_count, MAX_RETRIES))
+            sys.timerStart(function()
+                    isManualReconnecting = false
+                    startWebSocket()
+            end, delay)
+        else
+            log.error("Gotify WebSocket", "超过最大重试次数，切换到轮询模式")
+            websocket_enabled = false
+            sys.timerStart(startPolling, GOTIFY_POLL_INTERVAL)
+        end
+    end
+    
+    -- 事件回调
     ws:on("open", function()
         log.info("Gotify WebSocket", "连接已建立")
+        retry_count = 0  -- 重置重试计数器
+        
+        -- 示例：添加连接成功通知
         -- util_notify.add("WebSocket 连接已建立")
     end)
-
+    
     ws:on("message", function(msg)
-        log.info("Gotify WebSocket", "收到消息")
+        log.info("Gotify WebSocket", "收到消息:", msg)
         local ok, data = pcall(json.decode, msg)
         if ok and data and data.title == "sms" then
-            -- 只处理标题为 "sms" 的消息
             handleGotifyMessage(data)
+        else
+            log.warn("Gotify WebSocket", "收到非sms消息或解析失败", msg)
         end
     end)
-
+    
     ws:on("error", function(err)
         log.error("Gotify WebSocket", "发生错误:", err)
-        -- util_notify.add("WebSocket 发生错误: " .. tostring(err))
-        websocket_enabled = false -- 禁用 WebSocket，切换到轮询模式
-        sys.timerStart(startPolling, GOTIFY_POLL_INTERVAL)
+        util_notify.add("WebSocket 错误: "..tostring(err))
+        reconnect()
     end)
-
+    
     ws:on("close", function(code)
         log.warn("Gotify WebSocket", "连接关闭，关闭码:", code)
-        -- util_notify.add("WebSocket 连接已关闭，关闭码: " .. tostring(code))
-        websocket_enabled = false -- 禁用 WebSocket，切换到轮询模式
-        sys.timerStart(startPolling, GOTIFY_POLL_INTERVAL)
+        util_notify.add("WebSocket 关闭: "..tostring(code))
+        if not isManualReconnecting then  -- 只有非主动重连时才处理
+            log.warn("WS", "非主动断开, code:", code)
+            pcall(function()
+                reconnect()
+            end)
+        end
     end)
-
-    sys.taskInit(ws.start,ws,180)
+    
+    -- 启动连接（带180秒超时）
+    sys.taskInit(function()
+        if not ws:start(180, nil, 86400) then
+            log.error("Gotify WebSocket", "初始连接失败")
+            reconnect()
+        end
+    end)
 end
 
 -- HTTP 轮询方式
@@ -232,13 +291,18 @@ local function poll_gotify_messages()
             log.warn("Gotify Polling", "无效响应")
             return
         end
+
         local ok, data = pcall(json.decode, body)
         if ok and data and data.messages and #data.messages > 0 then
             for _, message in ipairs(data.messages) do
                 if message.title == "sms" then -- 只处理标题为 "sms" 的消息
                     handleGotifyMessage(message)
+                else
+                    log.info("Gotify Polling", "忽略消息，标题为:", message.title)
                 end
             end
+        else
+            log.warn("Gotify Polling", "消息无效或 JSON 解析失败")
         end
     end)
     sys.timerStart(poll_gotify_messages, GOTIFY_POLL_INTERVAL) -- 设置下一次轮询
