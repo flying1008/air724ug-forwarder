@@ -189,99 +189,51 @@ local function handleGotifyMessage(message)
     end)
 end
 
--- WebSocket 实时监听
 local function startWebSocket()
-    -- 重连控制变量
-    local retry_count = 0
-    local MAX_RETRIES = 5  -- 最大重试次数
-    local BASE_INTERVAL = 1000  -- 基础重连间隔(ms)
-    local MAX_INTERVAL = 30000  -- 最大重连间隔(ms)
-    
-    -- 当前连接实例
+    -- 连接配置参数（替代手动重试逻辑）
+    local config = {
+        keepAlive = 180,          -- 心跳间隔（秒）
+        retryInterval = 3000,     -- 重连间隔（毫秒）
+        maxRetryCount = 5,        -- 最大重试次数（0表示无限重试）
+        autoReconnect = true      -- 启用自动重连
+    }
+
+    -- 创建连接实例
     local ws = websocket.new(GOTIFY_WS_URL)
-    
-    -- 计算退避时间
-    local function getRetryDelay()
-        local delay = math.min(BASE_INTERVAL * (2 ^ retry_count), MAX_INTERVAL)
-        retry_count = retry_count + 1
-        return delay
-    end
-    
-    -- 清理函数
-    local function cleanup()
-        log.debug("Gotify WebSocket", "清理资源...")
-        if ws then
-            ws = nil
-        end
-    end
-    
-    local isManualReconnecting = false  -- 全局重连锁
-    -- 重连函数
-    local function reconnect()
-        log.debug("Gotify WebSocket", "尝试重连...")
-        if isManualReconnecting then return end  -- 防止重复进入
-    
-        isManualReconnecting = true
-        cleanup()
-        if retry_count <= MAX_RETRIES then
-            local delay = getRetryDelay()
-            log.warn("Gotify WebSocket", string.format("将在 %.1f 秒后尝试重连(%d/%d)", 
-                   delay/1000, retry_count, MAX_RETRIES))
-            sys.timerStart(function()
-                    isManualReconnecting = false
-                    startWebSocket()
-            end, delay)
-        else
-            log.error("Gotify WebSocket", "超过最大重试次数，切换到轮询模式")
-            websocket_enabled = false
-            sys.timerStart(startPolling, GOTIFY_POLL_INTERVAL)
-        end
-    end
-    
-    -- 事件回调
+
+    -- 事件回调（精简版，依赖 ws:start 的重连机制）
     ws:on("open", function()
         log.info("Gotify WebSocket", "连接已建立")
-        retry_count = 0  -- 重置重试计数器
-        
-        -- 示例：添加连接成功通知
-        -- util_notify.add("WebSocket 连接已建立")
+        -- 示例：发送初始消息（可选）
+        -- ws:send(json.encode({type = "register"}))
     end)
-    
+
     ws:on("message", function(msg)
         log.info("Gotify WebSocket", "收到消息:", msg)
         local ok, data = pcall(json.decode, msg)
         if ok and data and data.title == "sms" then
             handleGotifyMessage(data)
-        else
-            log.warn("Gotify WebSocket", "收到非sms消息或解析失败", msg)
         end
     end)
-    
+
     ws:on("error", function(err)
-        log.error("Gotify WebSocket", "发生错误:", err)
+        log.error("Gotify WebSocket", "错误:", err)
         util_notify.add("WebSocket 错误: "..tostring(err))
-        reconnect()
     end)
-    
+
     ws:on("close", function(code)
-        log.warn("Gotify WebSocket", "连接关闭，关闭码:", code)
-        util_notify.add("WebSocket 关闭: "..tostring(code))
-        if not isManualReconnecting then  -- 只有非主动重连时才处理
-            log.warn("WS", "非主动断开, code:", code)
-            pcall(function()
-                reconnect()
-            end)
-        end
+        log.warn("Gotify WebSocket", "连接关闭，状态码:", code)
+        -- 无需手动重连，由 ws:start 自动处理
     end)
-    
-    -- 启动连接（带180秒超时）
+
+    -- 启动连接（内置重连）
     sys.taskInit(function()
-        if not ws:start(180, nil, 86400) then
+        if not ws:start(config.keepAlive, nil, config.retryInterval) then
             log.error("Gotify WebSocket", "初始连接失败")
-            reconnect()
         end
     end)
 end
+
 
 -- HTTP 轮询方式
 local function poll_gotify_messages()
